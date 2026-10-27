@@ -398,12 +398,12 @@ def _pick_sub(lst):
 @app.route('/')
 def home():
     return jsonify({'status': 'online', 'message': 'YTDown Backend is running',
-                    'version': '4.2-warp'})
+                    'version': '4.3-diag'})
 
 
 @app.route('/api/health')
 def health():
-    return jsonify({'status': 'ok', 'warp': warp_up()})
+    return jsonify({'status': 'ok', 'warp': warp_up(), 'cookies': HAS_COOKIES})
 
 
 @app.route('/api/info', methods=['POST', 'GET'])
@@ -435,7 +435,9 @@ def video_info():
             media = gallery_media(url)
             if media:
                 return jsonify(media)
-        return jsonify({'success': False, 'message': friendly(msg)}), 400
+        return jsonify({'success': False, 'message': friendly(msg),
+                        'warp': warp_up(), 'cookies': HAS_COOKIES,
+                        'detail': msg[:200]}), 400
 
 
 # ------------------------------------------------------------------ jobs (download + merge)

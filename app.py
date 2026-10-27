@@ -128,7 +128,9 @@ def video_info():
                 if fps and fps > 30:
                     quality += f"{int(fps)}"
                 
-                key = f"video_{quality}_{ext}"
+                has_audio = acodec != 'none'
+                # Prefer progressive (video+audio together)
+                key = f"video_{quality}_{ext}_{'a' if has_audio else 'v'}"
                 if key not in seen:
                     seen.add(key)
                     formats.append({
@@ -138,7 +140,7 @@ def video_info():
                         'url': url_direct,
                         'size': format_filesize(filesize) if filesize else '',
                         'format_id': format_id,
-                        'has_audio': acodec != 'none'
+                        'has_audio': has_audio
                     })
 
             # Audio only
@@ -158,23 +160,25 @@ def video_info():
                         'has_audio': True
                     })
 
-        # Sort: videos by height desc, then audio
+        # Sort: prefer has_audio first, then higher resolution
         def sort_key(x):
             if x['type'] == 'video':
                 try:
                     h = int(re.search(r'(\d+)', x['quality']).group(1))
-                    return (0, -h)
+                    # has_audio=True comes first (0), then by height desc
+                    return (0 if x.get('has_audio') else 1, -h)
                 except:
-                    return (0, 0)
+                    return (1, 0)
             else:
-                return (1, 0)
+                return (2, 0)
 
         formats = sorted(formats, key=sort_key)
 
-        # Keep top quality options (limit to avoid huge response)
-        video_formats = [f for f in formats if f['type'] == 'video'][:8]
-        audio_formats = [f for f in formats if f['type'] == 'audio'][:4]
-        final_formats = video_formats + audio_formats
+        # Keep top quality options
+        video_with_audio = [f for f in formats if f['type'] == 'video' and f.get('has_audio')][:6]
+        video_only = [f for f in formats if f['type'] == 'video' and not f.get('has_audio')][:4]
+        audio_formats = [f for f in formats if f['type'] == 'audio'][:3]
+        final_formats = video_with_audio + video_only + audio_formats
 
         # If no formats found, try best
         if not final_formats:

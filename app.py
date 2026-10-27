@@ -20,6 +20,17 @@ def get_video_info(url):
         'extract_flat': False,
         'skip_download': True,
         'noplaylist': True,
+        # Try to bypass bot detection
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web'],
+                'player_skip': ['webpage', 'configs'],
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        },
     }
 
     try:
@@ -27,7 +38,24 @@ def get_video_info(url):
             info = ydl.extract_info(url, download=False)
             return info
     except Exception as e:
-        raise Exception(str(e))
+        # Second try with android client only
+        try:
+            ydl_opts2 = {
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+                'noplaylist': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android'],
+                    }
+                },
+            }
+            with yt_dlp.YoutubeDL(ydl_opts2) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return info
+        except Exception as e2:
+            raise Exception(str(e2))
 
 def format_filesize(size):
     if not size:

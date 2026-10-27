@@ -1,4 +1,5 @@
 import glob
+import hmac
 import ipaddress
 import os
 import re
@@ -128,15 +129,40 @@ def base_opts():
     return o
 
 
-def client_sets_for(url):
-    return CLIENT_SETS if is_youtube(url) else [None]
+WARP_PROXY = 'socks5://127.0.0.1:40000'
+
+
+def warp_up():
+    """True if the local WARP SOCKS5 proxy (wireproxy) is listening."""
+    if os.environ.get('USE_WARP', '1') == '0':
+        return False
+    try:
+        socket.create_connection(('127.0.0.1', 40000), timeout=0.4).close()
+        return True
+    except OSError:
+        return False
+
+
+def attempts_for(url):
+    """List of (proxy, youtube_client_set) to try, best first."""
+    if not is_youtube(url):
+        return [(None, None)]
+    out = []
+    if warp_up():
+        out += [(WARP_PROXY, cs) for cs in CLIENT_SETS[:4]]
+        out += [(None, cs) for cs in CLIENT_SETS[:2]]
+    else:
+        out += [(None, cs) for cs in CLIENT_SETS]
+    return out
 
 
 def extract_with_fallback(url):
     last = None
-    for cs in client_sets_for(url):
+    for proxy, cs in attempts_for(url):
         o = base_opts()
         o['skip_download'] = True
+        if proxy:
+            o['proxy'] = proxy
         if cs:
             o['extractor_args'] = {'youtube': {'player_client': cs}}
         try:
@@ -188,6 +214,34 @@ def gallery_media(url):
     return {'success': True, 'title': 'Post media', 'thumbnail': first_img, 'duration': '',
             'platform': urlparse(url).hostname or '', 'videos': [], 'original': None,
             'audios': [], 'mp3': [], 'images': [], 'subtitles': [], 'items': items}
+
+
+# ------------------------------------------------------------------ home-PC registry
+# A backend running on a home PC (residential IP) registers its tunnel URL here,
+# so the website can send YouTube requests to it instead of this (blocked) server.
+HOME = {'url': None, 'ts': 0.0}
+
+
+@app.route('/api/register', methods=['POST'])
+def register_home():
+    secret = os.environ.get('REGISTER_SECRET', '')
+    data = request.get_json(silent=True) or {}
+    if not secret or not hmac.compare_digest(str(data.get('secret', '')), secret):
+        return jsonify({'success': False}), 403
+    u = str(data.get('url', '')).strip()
+    p = urlparse(u)
+    if p.scheme != 'https' or not (p.hostname or '').endswith('.trycloudflare.com'):
+        return jsonify({'success': False, 'message': 'bad url'}), 400
+    HOME['url'] = u.rstrip('/')
+    HOME['ts'] = time.time()
+    return jsonify({'success': True})
+
+
+@app.route('/api/yt-backend')
+def yt_backend():
+    if HOME['url'] and time.time() - HOME['ts'] < 180:
+        return jsonify({'url': HOME['url']})
+    return jsonify({'url': None})
 
 
 # ------------------------------------------------------------------ info
@@ -344,12 +398,12 @@ def _pick_sub(lst):
 @app.route('/')
 def home():
     return jsonify({'status': 'online', 'message': 'YTDown Backend is running',
-                    'version': '4.0'})
+                    'version': '4.2-warp'})
 
 
 @app.route('/api/health')
 def health():
-    return jsonify({'status': 'ok'})
+    return jsonify({'status': 'ok', 'warp': warp_up()})
 
 
 @app.route('/api/info', methods=['POST', 'GET'])
@@ -407,7 +461,7 @@ def run_job(job, p):
         height, abr, aext = p['height'], p['abr'], p['aext']
         last_err = None
 
-        for cs in client_sets_for(url):
+        for proxy, cs in attempts_for(url):
             job['streams_done'] = 0
             job['streams'] = 2 if (kind == 'video') else 1
             set_job(job, status='working', phase='downloading', progress=1)
@@ -436,6 +490,8 @@ def run_job(job, p):
                 'progress_hooks': [hook],
                 'postprocessor_hooks': [phook],
             })
+            if proxy:
+                o['proxy'] = proxy
             if cs:
                 o['extractor_args'] = {'youtube': {'player_client': cs}}
 

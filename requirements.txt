@@ -1,0 +1,7 @@
+flask==3.0.3
+flask-cors==4.0.1
+yt-dlp[default]==2026.10.26
+curl-cffi==0.17.0
+gallery-dl
+requests
+gunicorn==21.2.0

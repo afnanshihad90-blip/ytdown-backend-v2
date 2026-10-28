@@ -132,7 +132,7 @@ def friendly(msg):
     if 'sign in to confirm' in low or re.search(r'\bbot\b', low):
         return ('YouTube blocked the server (bot check). '
                 'Please try again in a few minutes or try another video. '
-                + status_tag())
+                + status_tag() + ' | ' + re.sub(r'\s+', ' ', m.replace('\n', ' '))[:230])
     if 'private' in low:
         return 'This content is private.'
     if 'login' in low or 'cookies' in low or 'age' in low and 'restrict' in low:
@@ -444,12 +444,12 @@ def _pick_sub(lst):
 @app.route('/')
 def home():
     return jsonify({'status': 'online', 'message': 'YTDown Backend is running',
-                    'version': '4.5'})
+                    'version': '4.7'})
 
 
 @app.route('/api/health')
 def health():
-    return jsonify({'status': 'ok', 'version': '4.5', 'warp': warp_ok(),
+    return jsonify({'status': 'ok', 'version': '4.7', 'warp': warp_ok(),
                     'cookies': HAS_COOKIES, 'proxy': bool(YT_PROXY_LIST), 'proxies': len(YT_PROXY_LIST),
                     'impersonate': HAS_IMPERSONATE,
                     'ytdlp': getattr(yt_dlp.version, '__version__', '?')})

@@ -14,6 +14,12 @@ After deploy open `https://YOUR-URL/api/health`
 - `version:"4.4"` proves this fixed code is running.
 - `warp` turns true ~20-40s after boot only if WARP signed in.
 
+## v4.5
+
+- Fixed: impersonation was forced on every request (even fallback attempts); now optional with automatic retry without it.
+- curl-cffi pinned to a yt-dlp-compatible range.
+- /api/health now shows yt-dlp version + impersonate flag.
+
 ## What changed (v4.4 fix)
 
 1. **Original / best-quality no longer shrinks to a tiny mp4.**

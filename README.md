@@ -50,3 +50,12 @@ After deploy open `https://YOUR-URL/api/health`
   idle takes ~1 min to wake up (the frontend shows "starting up").
 - Free instances have an ephemeral filesystem — finished downloads are
   deleted on restart/spin-down (jobs expire in 15 min).
+
+## v4.5 proxies & cookies (env vars on Render)
+
+- `YT_PROXIES` - several proxies, comma or newline separated, e.g.
+  `http://user:pass@host:10001,http://user:pass@host:10002`
+  (a password containing `+` must be written `%2B`). Up to 3 random ones are tried per request.
+- `cookies.txt` in this folder is loaded automatically (YouTube-only cookies). KEEP THE REPO PRIVATE. Or use env `YT_COOKIES` / a Render Secret File instead.
+  Use a throw-away Google account and only youtube.com cookies. Never commit it to git.
+- `/api/health` shows `proxies` (count) and `cookies`.

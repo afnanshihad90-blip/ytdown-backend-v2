@@ -9,10 +9,26 @@ import hashlib
 import json
 import os
 import queue
+import re
 import threading
 import time
 
 import requests
+
+try:                                   # pycryptodome (in requirements.txt)
+    from Crypto.Cipher import AES as _AES
+
+    def _aes_cbc_dec(key, iv, data):
+        return _AES.new(key, _AES.MODE_CBC, iv).decrypt(data)
+except Exception:  # noqa: BLE001
+    try:                               # or the "cryptography" package
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        def _aes_cbc_dec(key, iv, data):
+            d = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+            return d.update(data) + d.finalize()
+    except Exception:  # noqa: BLE001
+        _aes_cbc_dec = None
 
 ADMIN_URL = (os.environ.get('ADMIN_URL') or '').strip().rstrip('/')
 ADMIN_SECRET = (os.environ.get('ADMIN_SECRET') or '').strip()
@@ -38,6 +54,37 @@ def _headers():
             'Content-Type': 'application/json'}
 
 
+_cookies = {}
+
+
+def _solve_challenge(html):
+    """Free hosts like InfinityFree answer scripts with a tiny "aes.js" page instead of the real
+    response. The page holds an AES key, iv and ciphertext; decrypting gives the __test cookie
+    a browser would set. We do the same so the backend can talk to our own admin panel."""
+    if _aes_cbc_dec is None:
+        return False
+    m = re.findall(r'toNumbers\("([0-9a-fA-F]+)"\)', html)
+    if len(m) < 3:
+        return False
+    try:
+        key, iv, ct = (bytes.fromhex(x) for x in m[:3])
+        _cookies['__test'] = _aes_cbc_dec(key, iv, ct).hex()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _request(method, path, **kw):
+    r = None
+    for attempt in (1, 2):
+        r = requests.request(method, _url(path), headers=_headers(),
+                             cookies=dict(_cookies) or None, **kw)
+        if attempt == 1 and '/aes.js' in r.text[:400] and _solve_challenge(r.text):
+            continue                       # retry once with the cookie
+        break
+    return r
+
+
 def config(force=False, ttl=45):
     """Settings from the admin panel (cached; last good copy is kept if the panel is down)."""
     if not ENABLED:
@@ -47,11 +94,12 @@ def config(force=False, ttl=45):
             return _state['data']
         _state['at'] = time.time()          # throttle retries even after a failure
     try:
-        r = requests.get(_url('api/config.php'), headers=_headers(), timeout=8)
+        r = _request('GET', 'api/config.php', timeout=8)
         try:
             data = r.json()
         except ValueError:
-            raise ValueError(f'not JSON (HTTP {r.status_code}): {r.text[:80]!r}')
+            hint = ' (browser-check not solved; is pycryptodome installed?)' if '/aes.js' in r.text[:400] else ''
+            raise ValueError(f'not JSON (HTTP {r.status_code}){hint}: {r.text[:80]!r}')
         if not r.ok or not data.get('ok'):
             raise ValueError(f"HTTP {r.status_code}: {str(data.get('error') or data)[:100]}")
         with _lock:
@@ -97,8 +145,7 @@ def _worker():
             except queue.Empty:
                 break
         try:
-            r = requests.post(_url('api/log.php'), headers=_headers(),
-                              data=json.dumps({'events': batch}), timeout=10)
+            r = _request('POST', 'api/log.php', data=json.dumps({'events': batch}), timeout=10)
             err = '' if r.ok else f'log HTTP {r.status_code}'
         except Exception as e:  # noqa: BLE001
             err = str(e)[:150]

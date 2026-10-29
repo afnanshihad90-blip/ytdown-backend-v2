@@ -5,3 +5,4 @@ curl-cffi>=0.10,<0.15
 gallery-dl
 requests
 gunicorn==21.2.0
+pycryptodome

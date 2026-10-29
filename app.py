@@ -628,6 +628,15 @@ def home():
                     'version': '4.8'})
 
 
+@app.route('/api/hit', methods=['POST', 'GET'])
+def hit():
+    """Called once per page view by the website; counted in the admin panel."""
+    ua = request.headers.get('User-Agent', '')
+    if ua and not re.search(r'bot|crawl|spider|curl|python|wget|monitor|headless', ua, re.I):
+        adminlink.event(kind='hit', ok=True, ip=adminlink.hash_ip(client_ip()))
+    return ('', 204)
+
+
 @app.route('/api/health')
 def health():
     return jsonify({'status': 'ok', 'version': '4.8', 'warp': warp_ok(),

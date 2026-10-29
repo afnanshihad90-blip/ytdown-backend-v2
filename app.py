@@ -627,7 +627,7 @@ def _pick_sub(lst):
 @app.route('/')
 def home():
     return jsonify({'status': 'online', 'message': 'YTDown Backend is running',
-                    'version': '4.8'})
+                    'version': '5.0'})
 
 
 @app.route('/api/hit', methods=['POST', 'GET'])
@@ -641,7 +641,7 @@ def hit():
 
 @app.route('/api/health')
 def health():
-    return jsonify({'status': 'ok', 'version': '4.8', 'warp': warp_ok(),
+    return jsonify({'status': 'ok', 'version': '5.0', 'warp': warp_ok(),
                     'cookies': HAS_COOKIES, 'proxy': bool(YT_PROXY_LIST), 'proxies': len(YT_PROXY_LIST),
                     'impersonate': HAS_IMPERSONATE,
                     'ytdlp': getattr(yt_dlp.version, '__version__', '?'),
@@ -680,6 +680,9 @@ def video_info():
         return jsonify({'success': False, 'message': 'No URL provided'}), 400
     if not is_valid_url(url):
         return jsonify({'success': False, 'message': 'Invalid URL'}), 400
+
+    if is_youtube(url):
+        return jsonify({'success': False, 'message': 'YouTube downloads are not available on this site.'}), 400
 
     cfg = sync_admin()
     t0 = time.time()
@@ -868,6 +871,9 @@ def create_job():
         'aext': re.sub(r'[^a-z0-9]', '', str(data.get('aext', '')).lower())[:5],
         'ip': adminlink.hash_ip(client_ip()),
     }
+
+    if is_youtube(url):
+        return jsonify({'success': False, 'message': 'YouTube downloads are not available on this site.'}), 400
 
     purge_jobs()
     if not SLOTS.acquire(blocking=False):

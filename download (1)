@@ -1,3 +1,2 @@
-.git
-__pycache__
-*.pyc
+*.sh text eol=lf
+Dockerfile text eol=lf

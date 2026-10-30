@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 import uuid
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, parse_qsl, urlencode, urlunparse
 
 import requests
 import yt_dlp
@@ -29,7 +29,9 @@ MAX_MP3_DURATION = 25 * 60          # seconds (mp3 conversion is CPU heavy)
 MAX_FILESIZE = 400 * 1024 * 1024    # bytes per stream
 MAX_PROXY_BYTES = 150 * 1024 * 1024
 MAX_JOBS_AT_ONCE = 2
-JOB_TTL = 15 * 60                   # keep finished files this long
+JOB_TTL = 30 * 60                   # keep finished files this long (also = repeat-download cache)
+INFO_TTL = 15 * 60                  # remember link info (title, formats) this long
+CACHE_MAX_BYTES = int(os.environ.get('CACHE_MAX_MB', '600')) * 1024 * 1024   # disk cap for finished files
 
 IMG_EXTS = {'jpg', 'jpeg', 'png', 'webp', 'gif', 'avif'}
 UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -137,6 +139,58 @@ RETRY_HINTS = ('sign in', 'bot', 'confirm you', '403', 'requested format',
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()
+
+# ------------------------------------------------------------------ speed caches (in memory)
+INFO_CACHE = {}            # url key -> (time, response dict, raw yt-dlp info or None)
+INFO_LOCKS = {}            # url key -> lock (same link requested twice at once = one lookup)
+INFO_GUARD = threading.Lock()
+JOB_KEYS = {}              # (url key, kind, quality...) -> job id  (repeat download = instant)
+_DROP_PARAMS = {'igsh', 'igshid', 'fbclid', 'si', 'feature', 'ref_src', 'ref_url', 's', 't',
+                'is_from_webapp', 'sender_device', 'sender_web_id', 'web_id', '_r', '_t',
+                'share_app_id', 'share_link_id', 'share_item_id', 'source', 'mibextid',
+                '__cft__', '__tn__'}
+
+
+def cache_key(url):
+    """Same post shared from different places (tracking params) -> same cache key."""
+    try:
+        p = urlparse(url.strip())
+        q = sorted((k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+                   if k.lower() not in _DROP_PARAMS and not k.lower().startswith('utm_'))
+        return urlunparse((p.scheme.lower(), p.netloc.lower(), p.path.rstrip('/') or '/',
+                           '', urlencode(q), ''))
+    except Exception:  # noqa: BLE001
+        return url.strip()
+
+
+def info_cache_get(key):
+    hit = INFO_CACHE.get(key)
+    if hit and time.time() - hit[0] < INFO_TTL:
+        return hit
+    if hit:
+        INFO_CACHE.pop(key, None)
+    return None
+
+
+def info_cache_put(key, resp, raw):
+    if len(INFO_CACHE) >= 60:                       # keep memory small
+        for k in sorted(INFO_CACHE, key=lambda x: INFO_CACHE[x][0])[:20]:
+            INFO_CACHE.pop(k, None)
+    INFO_CACHE[key] = (time.time(), resp, raw)
+
+
+def info_lock(key):
+    with INFO_GUARD:
+        return INFO_LOCKS.setdefault(key, threading.Lock())
+
+
+def job_cache_key(params):
+    k = params['kind']
+    return (cache_key(params['url']), k,
+            params['height'] if k == 'video' else 0,
+            params['abr'] if k == 'audio' else 0,
+            params['aext'] if k == 'audio' else '',
+            params['q'] if k == 'mp3' else 0)
 SLOTS = threading.BoundedSemaphore(MAX_JOBS_AT_ONCE)
 
 
@@ -627,7 +681,13 @@ def _pick_sub(lst):
 @app.route('/')
 def home():
     return jsonify({'status': 'online', 'message': 'YTDown Backend is running',
-                    'version': '5.0'})
+                    'version': '5.1'})
+
+
+@app.route('/api/ping')
+def ping():
+    """Tiny endpoint for UptimeRobot (keeps the free server awake)."""
+    return 'ok', 200, {'Cache-Control': 'no-store'}
 
 
 @app.route('/api/hit', methods=['POST', 'GET'])
@@ -641,7 +701,8 @@ def hit():
 
 @app.route('/api/health')
 def health():
-    return jsonify({'status': 'ok', 'version': '5.0', 'warp': warp_ok(),
+    return jsonify({'status': 'ok', 'version': '5.1', 'warp': warp_ok(),
+                    'cached_links': len(INFO_CACHE), 'cached_files': len(JOB_KEYS),
                     'cookies': HAS_COOKIES, 'proxy': bool(YT_PROXY_LIST), 'proxies': len(YT_PROXY_LIST),
                     'impersonate': HAS_IMPERSONATE,
                     'ytdlp': getattr(yt_dlp.version, '__version__', '?'),
@@ -657,14 +718,14 @@ def ytdlp_lookup(url):
                         or resp['items'] or resp['images'])
         if not has_anything:
             raise Exception('No downloadable media found')
-        return resp, 'yt-dlp (' + via + ')'
+        return resp, 'yt-dlp (' + via + ')', info
     except Exception as e:  # noqa: BLE001
         low = clean(e).lower()
         if ('unsupported url' in low or 'no video' in low or 'no media' in low
                 or 'no downloadable' in low or 'not a video' in low):
             media = gallery_media(url)
             if media:
-                return media, 'gallery-dl'
+                return media, 'gallery-dl', None
         raise
 
 
@@ -684,6 +745,18 @@ def video_info():
     if is_youtube(url):
         return jsonify({'success': False, 'message': 'YouTube downloads are not available on this site.'}), 400
 
+    ckey = cache_key(url)
+    hit = info_cache_get(ckey)
+    if hit:
+        return jsonify(hit[1])
+    with info_lock(ckey):                      # 2 people pasting the same link = 1 lookup
+        hit = info_cache_get(ckey)
+        if hit:
+            return jsonify(hit[1])
+        return _info_uncached(url, ckey)
+
+
+def _info_uncached(url, ckey):
     cfg = sync_admin()
     t0 = time.time()
     ip = adminlink.hash_ip(client_ip())
@@ -705,8 +778,10 @@ def video_info():
             if prov == 'apify':
                 resp, k = apify_extract(url, keys, cfg.get('apify_actor') or APIFY_ACTOR_DEFAULT)
                 via = f"apify ({k.get('name')})"
+                raw = None
             else:
-                resp, via = ytdlp_lookup(url)
+                resp, via, raw = ytdlp_lookup(url)
+            info_cache_put(ckey, resp, raw)
             adminlink.event(kind='info', ok=True, platform=host, provider=via, reason='ok',
                             url=short_url(url), ip=ip, ms=int((time.time() - t0) * 1000))
             return jsonify(resp)
@@ -722,14 +797,32 @@ def video_info():
 
 
 # ------------------------------------------------------------------ jobs (download + merge)
+def _drop_job(jid):
+    j = JOBS.pop(jid, None)
+    if not j:
+        return
+    shutil.rmtree(j['workdir'], ignore_errors=True)
+    if j.get('key') and JOB_KEYS.get(j['key']) == jid:
+        JOB_KEYS.pop(j['key'], None)
+
+
 def purge_jobs():
     now = time.time()
     with JOBS_LOCK:
         for jid in list(JOBS):
             j = JOBS[jid]
             if j['status'] in ('ready', 'error') and now - j['updated'] > JOB_TTL:
-                shutil.rmtree(j['workdir'], ignore_errors=True)
-                del JOBS[jid]
+                _drop_job(jid)
+        # disk cap: remove the least recently used finished files first
+        ready = sorted((j for j in JOBS.values() if j['status'] == 'ready'),
+                       key=lambda j: j['updated'])
+        total = sum(j['size'] for j in ready)
+        while ready and total > CACHE_MAX_BYTES:
+            j = ready.pop(0)
+            total -= j['size']
+            _drop_job(j['id'])
+    for k in [k for k, v in INFO_CACHE.items() if now - v[0] >= INFO_TTL]:
+        INFO_CACHE.pop(k, None)
 
 
 def set_job(job, **kw):
@@ -743,6 +836,8 @@ def run_job(job, p):
         limit = MAX_MP3_DURATION if kind == 'mp3' else MAX_DURATION
         height, abr, aext = p['height'], p['abr'], p['aext']
         last_err = None
+        hit = info_cache_get(cache_key(url))
+        raw = hit[2] if hit and hit[2] and not hit[2].get('entries') else None   # reuse lookup (skips 2nd extraction)
 
         for px, cs, imp in attempts_for(url):
             job['streams_done'] = 0
@@ -769,7 +864,7 @@ def run_job(job, p):
                 'outtmpl': os.path.join(job['workdir'], 'out.%(ext)s'),
                 'max_filesize': MAX_FILESIZE,
                 'match_filter': yt_dlp.utils.match_filter_func(f'duration <=? {limit}'),
-                'concurrent_fragment_downloads': 3,
+                'concurrent_fragment_downloads': 5,
                 'progress_hooks': [hook],
                 'postprocessor_hooks': [phook],
             })
@@ -808,7 +903,19 @@ def run_job(job, p):
 
             try:
                 with yt_dlp.YoutubeDL(o) as y:
-                    info = y.extract_info(url, download=True)
+                    info = None
+                    if raw is not None:
+                        try:
+                            info = y.process_ie_result(y.sanitize_info(raw), download=True)
+                        except Exception:  # noqa: BLE001
+                            raw = None     # expired link etc. -> normal path below
+                            for f in glob.glob(os.path.join(job['workdir'], 'out.*')):
+                                try:
+                                    os.remove(f)
+                                except OSError:
+                                    pass
+                    if info is None:
+                        info = y.extract_info(url, download=True)
                 last_err = None
                 break
             except Exception as e:  # noqa: BLE001
@@ -876,6 +983,13 @@ def create_job():
         return jsonify({'success': False, 'message': 'YouTube downloads are not available on this site.'}), 400
 
     purge_jobs()
+    jkey = job_cache_key(params)
+    with JOBS_LOCK:                                  # same file already made / being made?
+        old = JOBS.get(JOB_KEYS.get(jkey, ''))
+        if old and (old['status'] == 'working' or
+                    (old['status'] == 'ready' and old['path'] and os.path.exists(old['path']))):
+            old['updated'] = time.time()
+            return jsonify({'success': True, 'id': old['id'], 'cached': True})
     if not SLOTS.acquire(blocking=False):
         return jsonify({'success': False,
                         'message': 'Server is busy with other downloads. Try again in a minute.'}), 503
@@ -884,9 +998,10 @@ def create_job():
     job = {'id': jid, 'status': 'working', 'phase': 'starting', 'progress': 0,
            'message': '', 'workdir': tempfile.mkdtemp(prefix='ytd_'),
            'updated': time.time(), 'path': None, 'size': 0, 'filename': '',
-           'streams': 1, 'streams_done': 0}
+           'streams': 1, 'streams_done': 0, 'key': jkey}
     with JOBS_LOCK:
         JOBS[jid] = job
+        JOB_KEYS[jkey] = jid
     adminlink.event(kind='download', ok=True, platform=(urlparse(url).hostname or '').replace('www.', ''),
                     provider=f'job:{kind}', reason='started', url=short_url(url), ip=params['ip'])
     threading.Thread(target=run_job, args=(job, params), daemon=True).start()
